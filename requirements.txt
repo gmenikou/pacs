@@ -1,1 +1,5 @@
-import pydicom
+streamlit==1.44.1
+requests==2.32.3
+pydicom==3.0.1
+pillow==11.1.0
+numpy==2.2.4
