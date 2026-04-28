@@ -128,10 +128,12 @@ st.title("Mini PACS Downloader + Preview Viewer 🩻")
 with st.sidebar:
     st.header("Settings")
 
-    orthanc_url = st.text_input(
-        "Orthanc URL",
-        value=DEFAULT_ORTHANC_URL
-    ).rstrip("/")
+   orthanc_url = st.sidebar.text_input(
+    "Orthanc URL",
+    value="http://127.0.0.1:8042"
+).strip().rstrip("/")
+
+st.write("Using Orthanc URL:", orthanc_url)
 
     download_root = st.text_input(
         "Download folder",
