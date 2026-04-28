@@ -14,7 +14,7 @@ from PIL import Image
 # CONFIG
 # =========================
 
-DEFAULT_ORTHANC_URL = "http://localhost:8042"
+DEFAULT_ORTHANC_URL = "http://127.0.0.1:8042"
 DEFAULT_DOWNLOAD_DIR = "./dicom_downloads"
 
 
@@ -46,30 +46,13 @@ def get_instance_file(url, instance_id):
     return r.content
 
 
-def dicom_to_image(dicom_bytes, window_center=None, window_width=None):
+def dicom_to_image(dicom_bytes):
     ds = pydicom.dcmread(BytesIO(dicom_bytes))
     arr = ds.pixel_array.astype(np.float32)
 
     slope = float(getattr(ds, "RescaleSlope", 1))
     intercept = float(getattr(ds, "RescaleIntercept", 0))
     arr = arr * slope + intercept
-
-    if window_center is None:
-        wc = getattr(ds, "WindowCenter", None)
-        if isinstance(wc, pydicom.multival.MultiValue):
-            wc = wc[0]
-        window_center = float(wc) if wc is not None else None
-
-    if window_width is None:
-        ww = getattr(ds, "WindowWidth", None)
-        if isinstance(ww, pydicom.multival.MultiValue):
-            ww = ww[0]
-        window_width = float(ww) if ww is not None else None
-
-    if window_center is not None and window_width is not None:
-        low = window_center - window_width / 2
-        high = window_center + window_width / 2
-        arr = np.clip(arr, low, high)
 
     arr = arr - np.min(arr)
     arr = arr / (np.max(arr) + 1e-6)
@@ -95,52 +78,49 @@ def get_study_display_name(study):
     main = study.get("MainDicomTags", {})
     patient = study.get("PatientMainDicomTags", {})
 
-    patient_name = patient.get("PatientName", "UnknownPatient")
-    patient_id = patient.get("PatientID", "UnknownID")
-    study_date = main.get("StudyDate", "UnknownDate")
-    accession = main.get("AccessionNumber", "NoAccession")
-    description = main.get("StudyDescription", "NoDescription")
-
-    return safe_name(f"{patient_id}_{patient_name}_{study_date}_{accession}_{description}")
+    return safe_name(
+        f"{patient.get('PatientID','ID')}_"
+        f"{patient.get('PatientName','Name')}_"
+        f"{main.get('StudyDate','Date')}_"
+        f"{main.get('AccessionNumber','Acc')}_"
+        f"{main.get('StudyDescription','Desc')}"
+    )
 
 
 def get_series_display_name(series):
     tags = series.get("MainDicomTags", {})
 
-    modality = tags.get("Modality", "UnknownModality")
-    number = tags.get("SeriesNumber", "NoSeriesNumber")
-    description = tags.get("SeriesDescription", "NoDescription")
-
-    return safe_name(f"{modality}_Series_{number}_{description}")
+    return safe_name(
+        f"{tags.get('Modality','Mod')}_"
+        f"Series_{tags.get('SeriesNumber','No')}_"
+        f"{tags.get('SeriesDescription','Desc')}"
+    )
 
 
 # =========================
-# STREAMLIT UI
+# UI
 # =========================
 
-st.set_page_config(
-    page_title="Mini PACS Downloader",
-    layout="wide"
-)
-
+st.set_page_config(page_title="Mini PACS Downloader", layout="wide")
 st.title("Mini PACS Downloader + Preview Viewer 🩻")
+
+
+# =========================
+# SIDEBAR
+# =========================
 
 with st.sidebar:
     st.header("Settings")
 
-   orthanc_url = st.sidebar.text_input(
-    "Orthanc URL",
-    value="http://127.0.0.1:8042"
-).strip().rstrip("/")
-
-st.write("Using Orthanc URL:", orthanc_url)
+    orthanc_url = st.text_input(
+        "Orthanc URL",
+        value=DEFAULT_ORTHANC_URL
+    ).strip().rstrip("/")
 
     download_root = st.text_input(
         "Download folder",
         value=DEFAULT_DOWNLOAD_DIR
     )
-
-    st.caption("Example: `/home/user/dicom_downloads` or `D:/DICOM_Downloads`")
 
     st.divider()
 
@@ -150,25 +130,35 @@ st.write("Using Orthanc URL:", orthanc_url)
     patient_name = st.text_input("Patient Name")
     accession = st.text_input("Accession Number")
     study_date = st.text_input("Study Date YYYYMMDD")
-    modality = st.text_input("Modality, e.g. CT or MR")
+    modality = st.text_input("Modality (CT/MR)")
 
     search_clicked = st.button("Search studies")
 
 
 # =========================
-# TEST CONNECTION
+# DEBUG CONNECTION
 # =========================
 
+st.write("🔗 Using Orthanc URL:", orthanc_url)
+
 try:
-    system_info = orthanc_get(orthanc_url, "/system")
+    r = requests.get(f"{orthanc_url}/system", timeout=5)
+    st.write("Status code:", r.status_code)
+    st.write("Response:", r.text[:200])
+
+    r.raise_for_status()
+    system_info = r.json()
+
     st.success(f"Connected to Orthanc: {system_info.get('Name', 'Orthanc')}")
+
 except Exception as e:
     st.error(f"Cannot connect to Orthanc at {orthanc_url}")
+    st.exception(e)
     st.stop()
 
 
 # =========================
-# SEARCH STUDIES
+# SEARCH
 # =========================
 
 if search_clicked:
@@ -191,15 +181,12 @@ if search_clicked:
         "Expand": True
     }
 
-    try:
-        studies = orthanc_post(orthanc_url, "/tools/find", payload)
-        st.session_state["studies"] = studies
-    except Exception as e:
-        st.error(f"Search failed: {e}")
+    studies = orthanc_post(orthanc_url, "/tools/find", payload)
+    st.session_state["studies"] = studies
 
 
 # =========================
-# DISPLAY STUDIES
+# DISPLAY
 # =========================
 
 studies = st.session_state.get("studies", [])
@@ -207,129 +194,49 @@ studies = st.session_state.get("studies", [])
 if studies:
     st.subheader(f"Found {len(studies)} studies")
 
-    for idx, study in enumerate(studies):
+    for study in studies:
         study_id = study["ID"]
-        study_tags = study.get("MainDicomTags", {})
-        patient_tags = study.get("PatientMainDicomTags", {})
 
-        patient_id_value = patient_tags.get("PatientID", "")
-        patient_name_value = patient_tags.get("PatientName", "")
-        study_date_value = study_tags.get("StudyDate", "")
-        accession_value = study_tags.get("AccessionNumber", "")
-        description_value = study_tags.get("StudyDescription", "")
+        with st.expander(f"Study {study_id}"):
 
-        with st.expander(
-            f"{idx + 1}. {patient_id_value} | {patient_name_value} | "
-            f"{study_date_value} | {accession_value} | {description_value}"
-        ):
-            col_a, col_b, col_c = st.columns([2, 2, 2])
+            study_folder = os.path.join(
+                download_root,
+                get_study_display_name(study)
+            )
 
-            with col_a:
-                st.write("**Patient ID:**", patient_id_value)
-                st.write("**Patient Name:**", patient_name_value)
+            st.code(study_folder)
 
-            with col_b:
-                st.write("**Study Date:**", study_date_value)
-                st.write("**Accession:**", accession_value)
+            if st.button("Download study", key=study_id):
+                download_archive(
+                    orthanc_url,
+                    "studies",
+                    study_id,
+                    study_folder
+                )
+                st.success("Downloaded ✔")
 
-            with col_c:
-                st.write("**Description:**", description_value)
-                st.write("**Orthanc Study ID:**", study_id)
-
-            study_folder_name = get_study_display_name(study)
-            study_destination = os.path.join(download_root, study_folder_name)
-
-            st.code(study_destination)
-
-            if st.button("Download full study", key=f"download_study_{study_id}"):
-                try:
-                    saved_to = download_archive(
-                        orthanc_url,
-                        "studies",
-                        study_id,
-                        study_destination
-                    )
-                    st.success(f"Study saved to: {saved_to}")
-                except Exception as e:
-                    st.error(f"Study download failed: {e}")
-
-            if st.button("Load series", key=f"load_series_{study_id}"):
-                full_study = orthanc_get(orthanc_url, f"/studies/{study_id}")
-                st.session_state[f"series_{study_id}"] = full_study.get("Series", [])
+            if st.button("Load series", key=f"s_{study_id}"):
+                data = orthanc_get(orthanc_url, f"/studies/{study_id}")
+                st.session_state[f"series_{study_id}"] = data["Series"]
 
             series_ids = st.session_state.get(f"series_{study_id}", [])
 
-            if series_ids:
-                st.markdown("### Series")
+            for series_id in series_ids:
+                series = orthanc_get(orthanc_url, f"/series/{series_id}")
 
-                for series_id in series_ids:
-                    try:
-                        series = orthanc_get(orthanc_url, f"/series/{series_id}")
-                    except Exception:
-                        continue
+                st.write("Series:", series_id)
 
-                    series_tags = series.get("MainDicomTags", {})
-                    series_name = get_series_display_name(series)
-                    series_destination = os.path.join(study_destination, series_name)
+                if st.button("Preview", key=series_id):
+                    inst = series["Instances"][0]
+                    dcm = get_instance_file(orthanc_url, inst)
+                    img = dicom_to_image(dcm)
+                    st.image(img)
 
-                    st.markdown("---")
-                    st.write(
-                        f"**{series_tags.get('Modality', '')} | "
-                        f"Series {series_tags.get('SeriesNumber', '')} | "
-                        f"{series_tags.get('SeriesDescription', '')}**"
+                if st.button("Download series", key=f"d_{series_id}"):
+                    download_archive(
+                        orthanc_url,
+                        "series",
+                        series_id,
+                        os.path.join(study_folder, series_id)
                     )
-
-                    st.code(series_destination)
-
-                    col1, col2, col3 = st.columns([1, 1, 2])
-
-                    with col1:
-                        if st.button("Preview", key=f"preview_{series_id}"):
-                            instances = series.get("Instances", [])
-
-                            if not instances:
-                                st.warning("No instances found in this series.")
-                            else:
-                                st.session_state[f"preview_series_{series_id}"] = instances
-
-                    with col2:
-                        if st.button("Download series", key=f"download_series_{series_id}"):
-                            try:
-                                saved_to = download_archive(
-                                    orthanc_url,
-                                    "series",
-                                    series_id,
-                                    series_destination
-                                )
-                                st.success(f"Series saved to: {saved_to}")
-                            except Exception as e:
-                                st.error(f"Series download failed: {e}")
-
-                    preview_instances = st.session_state.get(f"preview_series_{series_id}")
-
-                    if preview_instances:
-                        slice_index = st.slider(
-                            "Slice",
-                            min_value=0,
-                            max_value=len(preview_instances) - 1,
-                            value=0,
-                            key=f"slice_{series_id}"
-                        )
-
-                        instance_id = preview_instances[slice_index]
-
-                        try:
-                            dicom_bytes = get_instance_file(orthanc_url, instance_id)
-                            img = dicom_to_image(dicom_bytes)
-
-                            with col3:
-                                st.image(
-                                    img,
-                                    caption=f"Preview slice {slice_index + 1}/{len(preview_instances)}",
-                                    use_container_width=True
-                                )
-                        except Exception as e:
-                            st.error(f"Preview failed: {e}")
-
-else:
-    st.info("Search for a study using the sidebar.")
+                    st.success("Downloaded ✔")
